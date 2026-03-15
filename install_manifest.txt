@@ -1,0 +1,3 @@
+/usr/local/bin/heimdall
+/usr/local/bin/heimdall-frontend.app/Contents/MacOS/heimdall-frontend
+/usr/local/bin/heimdall-frontend.app/Contents/Info.plist

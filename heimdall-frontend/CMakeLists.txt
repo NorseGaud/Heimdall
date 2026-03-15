@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8.4)
+cmake_minimum_required(VERSION 3.10)
 
 project(heimdall-frontend)
 
@@ -51,6 +51,7 @@ target_link_libraries(heimdall-frontend pit)
 target_link_libraries(heimdall-frontend Qt5::Widgets)
 target_link_libraries(heimdall-frontend z)
 install (TARGETS heimdall-frontend
+		BUNDLE	DESTINATION ${CMAKE_INSTALL_PREFIX}/bin
 		RUNTIME	DESTINATION ${CMAKE_INSTALL_PREFIX}/bin
 		LIBRARY	DESTINATION ${CMAKE_INSTALL_LIBDIR})
 

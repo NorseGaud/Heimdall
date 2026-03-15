@@ -1,0 +1,10 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/norsegaud/Heimdall/cmake_install.cmake",
+		"/Users/norsegaud/Heimdall/libpit/cmake_install.cmake",
+		"/Users/norsegaud/Heimdall/heimdall/cmake_install.cmake",
+		"/Users/norsegaud/Heimdall/heimdall-frontend/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

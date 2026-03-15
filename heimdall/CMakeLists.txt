@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 2.8.4)
+cmake_minimum_required(VERSION 3.10)
 
 project(heimdall)
 
@@ -45,7 +45,15 @@ use_large_files(heimdall YES)
 add_executable(heimdall ${HEIMDALL_SOURCE_FILES})
 
 target_link_libraries(heimdall PRIVATE pit)
-target_link_libraries(heimdall PRIVATE ${LIBUSB_LIBRARY})
+target_link_libraries(heimdall PRIVATE ${LIBUSB_LIBRARIES})
+
+if(APPLE)
+    # Static libusb on macOS requires these frameworks for darwin_usb symbols.
+    target_link_libraries(heimdall PRIVATE
+        "-framework CoreFoundation"
+        "-framework IOKit"
+        "-framework Security")
+endif()
 install (TARGETS heimdall
 		RUNTIME	DESTINATION ${CMAKE_INSTALL_PREFIX}/bin
 		LIBRARY	DESTINATION ${CMAKE_INSTALL_LIBDIR})

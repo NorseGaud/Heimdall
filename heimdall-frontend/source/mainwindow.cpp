@@ -25,6 +25,7 @@
 #include <QFileDialog>
 #include <QProcess>
 #include <QRegExp>
+#include <QStandardPaths>
 #include <QUrl>
 
 // Heimdall Frontend
@@ -34,69 +35,46 @@
 
 #define UNUSED(x) (void)(x)
 
+namespace
+{
+QString ResolveTrustedHeimdallExecutablePath(void)
+{
+	QStringList trustedSearchPaths;
+	trustedSearchPaths << QCoreApplication::applicationDirPath();
+	trustedSearchPaths << "/opt/homebrew/bin";
+	trustedSearchPaths << "/usr/local/bin";
+	trustedSearchPaths << "/usr/bin";
+	trustedSearchPaths.removeDuplicates();
+
+	return (QStandardPaths::findExecutable("heimdall", trustedSearchPaths));
+}
+}
+
 using namespace HeimdallFrontend;
 
 void MainWindow::StartHeimdall(const QStringList& arguments)
 {
 	UpdateInterfaceAvailability();
 
-	heimdallProcess.setReadChannel(QProcess::StandardOutput);
-	
-	heimdallProcess.start("heimdall", arguments);
-	heimdallProcess.waitForStarted(3000);
-	
-	// OS X was playing up and not finding heimdall, so we're manually checking the PATH.
-	if (heimdallFailed)
+	const QString heimdallExecutablePath = ResolveTrustedHeimdallExecutablePath();
+	if (heimdallExecutablePath.isEmpty())
 	{
-		QStringList environment = QProcess::systemEnvironment();
-		
-		QStringList paths;
+		heimdallFailed = true;
+		flashLabel->setText("Failed to start Heimdall!");
+		heimdallState = HeimdallState::Stopped;
+		UpdateInterfaceAvailability();
+		return;
+	}
 
-		// Ensure /usr/local/bin and /usr/bin are in PATH.
-		for (int i = 0; i < environment.length(); i++)
-		{
-			if (environment[i].left(5) == "PATH=")
-			{
-				paths = environment[i].mid(5).split(':');
-				
-				if (!paths.contains("/usr/local/bin"))
-					paths.prepend("/usr/local/bin");
-				
-				if (!paths.contains("/usr/bin"))
-					paths.prepend("/usr/bin");
-				
-				break;
-			}
-		}
-		
-		int pathIndex = -1;
+	heimdallFailed = false;
+	heimdallProcess.setReadChannel(QProcess::StandardOutput);
 
-		while (heimdallFailed && ++pathIndex < paths.length())
-		{
-			QString heimdallPath = paths[pathIndex];
-			
-			if (heimdallPath.length() > 0)
-			{
-				utilityOutputPlainTextEdit->clear();
-				heimdallFailed = false;
-				
-				if (heimdallPath[heimdallPath.length() - 1] != QDir::separator())
-					heimdallPath += QDir::separator();
-				
-				heimdallPath += "heimdall";
-				
-				heimdallProcess.start(heimdallPath, arguments);
-				heimdallProcess.waitForStarted(3000);
-			}
-		}
-		
-		if (heimdallFailed)
-		{
-			flashLabel->setText("Failed to start Heimdall!");
-			
-			heimdallState = HeimdallState::Stopped;
-			UpdateInterfaceAvailability();
-		}
+	heimdallProcess.start(heimdallExecutablePath, arguments);
+	if (!heimdallProcess.waitForStarted(3000))
+	{
+		heimdallFailed = true;
+		heimdallState = HeimdallState::Stopped;
+		UpdateInterfaceAvailability();
 	}
 }
 

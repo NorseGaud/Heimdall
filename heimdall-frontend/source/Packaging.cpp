@@ -23,6 +23,7 @@
 #endif
 
 // C/C++ Standard Library
+#include <limits>
 #include <stdio.h>
 
 // zlib
@@ -39,7 +40,86 @@
 
 using namespace HeimdallFrontend;
 
-const qint64 Packaging::kMaxFileSize = 8589934592ll;
+namespace
+{
+bool ParseTarOctalField(const char *fieldBuffer, int fieldBufferLength, qulonglong& parsedOctalValue)
+{
+	parsedOctalValue = 0;
+
+	int firstDigitIndex = 0;
+	while (firstDigitIndex < fieldBufferLength && (fieldBuffer[firstDigitIndex] == ' ' || fieldBuffer[firstDigitIndex] == '\0'))
+		firstDigitIndex++;
+
+	int lastDigitIndex = firstDigitIndex;
+	while (lastDigitIndex < fieldBufferLength && fieldBuffer[lastDigitIndex] >= '0' && fieldBuffer[lastDigitIndex] <= '7')
+	{
+		const qulonglong nextDigitValue = static_cast<qulonglong>(fieldBuffer[lastDigitIndex] - '0');
+		const qulonglong maxQuLongLong = std::numeric_limits<qulonglong>::max();
+
+		if (parsedOctalValue > (maxQuLongLong - nextDigitValue) / 8)
+			return (false);
+
+		parsedOctalValue = parsedOctalValue * 8 + nextDigitValue;
+		lastDigitIndex++;
+	}
+
+	if (lastDigitIndex == firstDigitIndex)
+		return (false);
+
+	for (int index = lastDigitIndex; index < fieldBufferLength; index++)
+	{
+		if (fieldBuffer[index] != ' ' && fieldBuffer[index] != '\0')
+			return (false);
+	}
+
+	return (true);
+}
+
+bool WriteTarOctalField(char *fieldBuffer, size_t fieldBufferLength, qulonglong fieldValue)
+{
+	const int writtenCharacterCount = snprintf(fieldBuffer, fieldBufferLength, "%0*llo", static_cast<int>(fieldBufferLength) - 1, static_cast<unsigned long long>(fieldValue));
+	return (writtenCharacterCount > 0 && static_cast<size_t>(writtenCharacterCount) < fieldBufferLength);
+}
+
+QString TarEntryNameFromHeader(const char *headerNameField, int headerNameFieldLength)
+{
+	int entryNameLength = 0;
+	while (entryNameLength < headerNameFieldLength && headerNameField[entryNameLength] != '\0')
+		entryNameLength++;
+
+	return (QString::fromUtf8(headerNameField, entryNameLength));
+}
+
+QString SanitizeTarEntryNameForTemporaryFile(const QString& tarEntryName)
+{
+	QString normalizedTarEntryName = tarEntryName;
+	normalizedTarEntryName.replace('\\', '/');
+
+	QString baseFilename = normalizedTarEntryName.section('/', -1);
+	if (baseFilename.isEmpty())
+		baseFilename = "extracted-file";
+
+	QString safeFilename;
+	safeFilename.reserve(baseFilename.length());
+
+	for (int index = 0; index < baseFilename.length(); index++)
+	{
+		const QChar currentCharacter = baseFilename[index];
+
+		if (currentCharacter.isLetterOrNumber() || currentCharacter == '.' || currentCharacter == '_' || currentCharacter == '-')
+			safeFilename.append(currentCharacter);
+		else
+			safeFilename.append('_');
+	}
+
+	if (safeFilename.isEmpty())
+		safeFilename = "extracted-file";
+
+	return (safeFilename.left(120));
+}
+}
+
+const qint64 Packaging::kMaxFileSize = 8589934591ll;
 const char *Packaging::ustarMagic = "ustar";
 
 bool Packaging::ExtractTar(QTemporaryFile& tarFile, PackageData *packageData)
@@ -104,13 +184,24 @@ bool Packaging::ExtractTar(QTemporaryFile& tarFile, PackageData *packageData)
 		}
 		else
 		{
-			int checksum = 0;
+			qulonglong expectedChecksum = 0;
+			if (!ParseTarOctalField(tarHeader.fields.checksum, sizeof(tarHeader.fields.checksum), expectedChecksum))
+			{
+				progressDialog.close();
+				Alerts::DisplayError("Tar header contained an invalid checksum.");
+
+				tarFile.close();
+
+				return (false);
+			}
+
+			int computedChecksum = 0;
 
 			for (char *bufferIndex = tarHeader.buffer; bufferIndex < tarHeader.fields.checksum; bufferIndex++)
-				checksum += static_cast<unsigned char>(*bufferIndex);
+				computedChecksum += static_cast<unsigned char>(*bufferIndex);
 
-			checksum += 8 * ' ';
-			checksum += static_cast<unsigned char>(tarHeader.fields.typeFlag);
+			computedChecksum += 8 * ' ';
+			computedChecksum += static_cast<unsigned char>(tarHeader.fields.typeFlag);
 
 			// Both the TAR and USTAR formats have terrible documentation, it's not clear if the following code is required.
 			/*if (ustarFormat)
@@ -119,16 +210,18 @@ bool Packaging::ExtractTar(QTemporaryFile& tarFile, PackageData *packageData)
 					checksum += static_cast<unsigned char>(*bufferIndex);
 			}*/
 
-			bool parsed = false;
-		
-			// The size field is not always null terminated, so we must create a copy and null terminate it for parsing.
-			char fileSizeString[13];
-			memcpy(fileSizeString, tarHeader.fields.size, 12);
-			fileSizeString[12] = '\0';
+			if (static_cast<qulonglong>(computedChecksum) != expectedChecksum)
+			{
+				progressDialog.close();
+				Alerts::DisplayError("Tar header checksum mismatch.");
 
-			qulonglong fileSize = QString(fileSizeString).toULongLong(&parsed, 8);
+				tarFile.close();
 
-			if (!parsed)
+				return (false);
+			}
+
+			qulonglong fileSize = 0;
+			if (!ParseTarOctalField(tarHeader.fields.size, sizeof(tarHeader.fields.size), fileSize))
 			{
 				progressDialog.close();
 				Alerts::DisplayError("Tar header contained an invalid file size.");
@@ -141,9 +234,10 @@ bool Packaging::ExtractTar(QTemporaryFile& tarFile, PackageData *packageData)
 			if (fileSize > 0 && tarHeader.fields.typeFlag == '0')
 			{
 				// We're working with a file.
-				QString filename = QString::fromUtf8(tarHeader.fields.name);
+				const QString tarEntryName = TarEntryNameFromHeader(tarHeader.fields.name, sizeof(tarHeader.fields.name));
+				const QString safeTemporaryFilename = SanitizeTarEntryNameForTemporaryFile(tarEntryName);
 
-				QTemporaryFile *outputFile = new QTemporaryFile("XXXXXX-" + filename);
+				QTemporaryFile *outputFile = new QTemporaryFile(QString("XXXXXX-%1").arg(safeTemporaryFilename));
 				packageData->GetFiles().append(outputFile);
 
 				if (!outputFile->open())
@@ -245,13 +339,13 @@ bool Packaging::WriteTarEntry(const QString& filePath, QTemporaryFile *tarFile, 
 
 	utfFilename = entryFilename.toUtf8();
 
-	if (utfFilename.length() > 100)
+	if (utfFilename.length() > static_cast<int>(sizeof(tarHeader.fields.name)))
 	{
 		Alerts::DisplayError(QString("File name is too long:\n%1").arg(qtFileInfo.fileName()));
 		return (false);
 	}
 
-	strcpy(tarHeader.fields.name, utfFilename.constData());
+	memcpy(tarHeader.fields.name, utfFilename.constData(), utfFilename.length());
 		
 	unsigned int mode = 0;
 
@@ -281,27 +375,58 @@ bool Packaging::WriteTarEntry(const QString& filePath, QTemporaryFile *tarFile, 
 	if (permissions.testFlag(QFile::ReadOwner))
 		mode |= TarHeader::kModeOwnerRead;
 
-	sprintf(tarHeader.fields.mode, "%07o", mode);
+	if (!WriteTarOctalField(tarHeader.fields.mode, sizeof(tarHeader.fields.mode), mode))
+	{
+		Alerts::DisplayError("Failed to encode TAR mode.");
+		return (false);
+	}
 
 	// Owner id
 	uint id = qtFileInfo.ownerId();
 
 	if (id < 2097151)
-		sprintf(tarHeader.fields.userId, "%07o", id);
-	else
-		sprintf(tarHeader.fields.userId, "%07o", 0);
+	{
+		if (!WriteTarOctalField(tarHeader.fields.userId, sizeof(tarHeader.fields.userId), id))
+		{
+			Alerts::DisplayError("Failed to encode TAR owner id.");
+			return (false);
+		}
+	}
+	else if (!WriteTarOctalField(tarHeader.fields.userId, sizeof(tarHeader.fields.userId), 0))
+	{
+		Alerts::DisplayError("Failed to encode TAR owner id.");
+		return (false);
+	}
 
 	// Group id
 	id = qtFileInfo.groupId();
 
 	if (id < 2097151)
-		sprintf(tarHeader.fields.groupId, "%07o", id);
-	else
-		sprintf(tarHeader.fields.groupId, "%07o", 0);
+	{
+		if (!WriteTarOctalField(tarHeader.fields.groupId, sizeof(tarHeader.fields.groupId), id))
+		{
+			Alerts::DisplayError("Failed to encode TAR group id.");
+			return (false);
+		}
+	}
+	else if (!WriteTarOctalField(tarHeader.fields.groupId, sizeof(tarHeader.fields.groupId), 0))
+	{
+		Alerts::DisplayError("Failed to encode TAR group id.");
+		return (false);
+	}
 
 	// Note: We don't support base-256 encoding. Support could be added later.
-	sprintf(tarHeader.fields.size, "%011llo", file.size());
-	sprintf(tarHeader.fields.modifiedTime, "%u", qtFileInfo.lastModified().toTime_t());
+	if (!WriteTarOctalField(tarHeader.fields.size, sizeof(tarHeader.fields.size), static_cast<qulonglong>(file.size())))
+	{
+		Alerts::DisplayError(QString("File is too large to be packaged:\n%1").arg(file.fileName()));
+		return (false);
+	}
+
+	if (!WriteTarOctalField(tarHeader.fields.modifiedTime, sizeof(tarHeader.fields.modifiedTime), static_cast<qulonglong>(qtFileInfo.lastModified().toTime_t())))
+	{
+		Alerts::DisplayError("Failed to encode TAR modified time.");
+		return (false);
+	}
 		
 	// Regular File
 	tarHeader.fields.typeFlag = '0';
@@ -313,7 +438,11 @@ bool Packaging::WriteTarEntry(const QString& filePath, QTemporaryFile *tarFile, 
 	for (int i = 0; i < TarHeader::kTarHeaderLength; i++)
 		checksum += static_cast<unsigned char>(tarHeader.buffer[i]);
 
-	sprintf(tarHeader.fields.checksum, "%07o", checksum);
+	if (!WriteTarOctalField(tarHeader.fields.checksum, sizeof(tarHeader.fields.checksum), checksum))
+	{
+		Alerts::DisplayError("Failed to encode TAR checksum.");
+		return (false);
+	}
 
 	// Write the header to the TAR file.
 	tarFile->write(tarHeader.buffer, TarHeader::kBlockLength);
